@@ -406,11 +406,28 @@ namespace lotus::apphook {
             }
         };
 
+        // Keep the application's open-file-description flags untouched. Wait
+        // for writable readiness instead of making forwarded sends blocking.
+        bool waitWritable(int fd) {
+            for (;;) {
+                pollfd    pfd{fd, POLLOUT, 0};
+                const int result = poll(&pfd, 1, -1);
+                if (result < 0 && errno == EINTR)
+                    continue;
+                return result > 0 && (pfd.revents & POLLOUT) && !(pfd.revents & (POLLERR | POLLNVAL));
+            }
+        }
+
         bool sendAll(int fd, const uint8_t* data, size_t size) {
             while (size) {
-                const ssize_t n = send(fd, data, size, MSG_NOSIGNAL);
+                const ssize_t n = send(fd, data, size, MSG_NOSIGNAL | MSG_DONTWAIT);
                 if (n < 0 && errno == EINTR)
                     continue;
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    if (!waitWritable(fd))
+                        return false;
+                    continue;
+                }
                 if (n <= 0)
                     return false;
                 data += n;
@@ -650,10 +667,20 @@ namespace lotus::apphook {
             msg.msg_iovlen     = 1;
             msg.msg_control    = message.controlSize ? message.control.data() : nullptr;
             msg.msg_controllen = message.controlSize;
+            // SCM_RIGHTS belongs to the first successfully transmitted byte.
+            // Retry sendmsg only while no bytes were transferred.
             ssize_t sent;
-            do {
-                sent = sendmsg(destination, &msg, MSG_NOSIGNAL);
-            } while (sent < 0 && errno == EINTR);
+            for (;;) {
+                sent = sendmsg(destination, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
+                if (sent < 0 && errno == EINTR)
+                    continue;
+                if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    if (!waitWritable(destination))
+                        return false;
+                    continue;
+                }
+                break;
+            }
             if (sent <= 0)
                 return false;
             return sendAll(destination, message.data.data() + sent, message.size - sent);
@@ -709,7 +736,7 @@ namespace lotus::apphook {
                         continue;
                     if (ready <= 0)
                         break;
-                    if (fds[0].revents & POLLIN) {
+                    if (fds[0].revents & (POLLIN | POLLHUP)) {
                         Received   message;
                         const bool readOk = receive(source, message);
                         if (readOk) {
@@ -742,7 +769,7 @@ namespace lotus::apphook {
                                 pump(conn, frames);
                         } else {
                             closeReceivedFds(message);
-                            if (message.size < 0 && errno == EINTR)
+                            if (message.size < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
                                 continue;
                             cleanEof = message.size == 0;
                             break;
@@ -755,10 +782,6 @@ namespace lotus::apphook {
                     }
                     if (fds[0].revents & (POLLERR | POLLNVAL))
                         break;
-                    if (fds[0].revents & POLLHUP) {
-                        cleanEof = true;
-                        break;
-                    }
                 }
             } catch (...) {
                 // A preload library must not terminate the host process on a backend
@@ -850,8 +873,7 @@ namespace lotus::apphook {
             // The application keeps its original nonblocking and close-on-exec flags.
             (void)fcntl(fd, F_SETFD, descriptorFlags);
             (void)fcntl(fd, F_SETFL, statusFlags);
-            // The bridge owns a separate open file description after dup2.
-            (void)fcntl(upstream, F_SETFL, statusFlags & ~O_NONBLOCK);
+            // Keep upstream flags unchanged; forwarding retries EAGAIN itself.
             downstream.detach();
             upstreamThread.detach();
             {
