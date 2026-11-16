@@ -19,6 +19,26 @@ target_link_options(lotus-apphook PRIVATE
     "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/apphook/lotus-apphook.map"
 )
 install(TARGETS lotus-apphook LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+
+# Optional, standalone Wayland wire backend. It shares the existing LHP1 IPC
+# contract but intercepts the Wayland Unix socket rather than client APIs.
+add_library(lotus-apphook-wayland-wire SHARED
+    apphook/lotus-apphook-wire.cpp
+    apphook/lotus-apphook-target.cpp
+    apphook/lotus-apphook-protocol.cpp
+)
+set_target_properties(lotus-apphook-wayland-wire PROPERTIES
+    OUTPUT_NAME "lotus-apphook-wayland-wire")
+target_compile_options(lotus-apphook-wayland-wire PRIVATE -fvisibility=hidden)
+target_include_directories(lotus-apphook-wayland-wire PRIVATE ${PROJECT_SOURCE_DIR}/common)
+target_link_libraries(lotus-apphook-wayland-wire PRIVATE ${CMAKE_DL_LIBS} Pthread::Pthread)
+target_link_options(lotus-apphook-wayland-wire PRIVATE
+    "-Wl,-z,defs"
+    "-Wl,-Bsymbolic-functions"
+    "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/apphook/lotus-apphook-wire.map"
+)
+install(TARGETS lotus-apphook-wayland-wire LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+
 add_library(lotus_core_objects OBJECT ${fcitx_lotus_core_sources})
 set_target_properties(lotus_core_objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(lotus_core_objects PRIVATE

@@ -1,0 +1,5 @@
+/* The wire preload exports no toolkit or client-library API hooks. */
+{
+    global: connect;
+    local: *;
+};
